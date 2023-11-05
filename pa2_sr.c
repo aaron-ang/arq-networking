@@ -72,63 +72,187 @@ extern double time_now;     // simulation time, for your debug purpose
 
 /********* YOU MAY ADD SOME ROUTINES HERE ********/
 
+#define BUFSIZE 50
+
+// A
+struct Sender
+{
+  int window_start;
+  int send_next;
+  int buffer_next;
+  int last_ack;
+  struct pkt *packet_buffer[BUFSIZE];
+} A_ent;
+
+// B
+struct Receiver
+{
+  int buffer_next;
+  struct pkt ack_pkt;
+  struct pkt *packet_buffer[BUFSIZE];
+} B_ent;
+
+// Statistics
+int num_original_transmitted = 0;
+int num_retransmissions = 0;
+int num_delivered = 0;
+int num_ack_sent = 0;
+int num_ack_received = 0;
+int num_corrupted = 0;
+
+int get_checksum(struct pkt *packet)
+{
+  int checksum = 0;
+  checksum += packet->seqnum;
+  checksum += packet->acknum;
+  for (int i = 0; i < 20; i++)
+  {
+    checksum += packet->payload[i];
+  }
+  return checksum;
+}
+
+void send_window(void)
+{
+  while (A_ent.send_next < A_ent.buffer_next && A_ent.send_next < A_ent.window_start + WINDOW_SIZE)
+  {
+    struct pkt *packet = A_ent.packet_buffer[A_ent.send_next % BUFSIZE];
+    tolayer3(A, *packet);
+    num_original_transmitted++;
+    printf("  send_window: send packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+    A_ent.send_next = (A_ent.send_next + 1) % BUFSIZE;
+  }
+  restart_rxmt_timer();
+}
+
+void send_ack(struct pkt ack_packet)
+{
+  tolayer3(B, ack_packet);
+  num_ack_sent++;
+}
+
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
 /* called from layer 5, passed the data to be sent to other side */
-void
-    A_output(message) struct msg message;
+void A_output(struct msg message)
 {
+  printf("  A_output: buffer packet (seq=%d): %s\n", A_ent.buffer_next, message.data);
+  struct pkt *packet = A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE];
+  packet->seqnum = A_ent.send_next % LIMIT_SEQNO;
+  memmove(packet->payload, message.data, 20);
+  packet->checksum = get_checksum(&packet);
+  A_ent.buffer_next = (A_ent.buffer_next + 1) % BUFSIZE;
+  send_window();
 }
 
 /* called from layer 3, when a packet arrives for layer 4 */
-void
-    A_input(packet) struct pkt packet;
+void A_input(struct pkt ack_packet)
 {
+  num_ack_received++;
+  if (ack_packet.checksum != get_checksum(&ack_packet))
+  {
+    num_corrupted++;
+    printf("  A_input: recv corrupted ACK (ack=%d)\n", ack_packet.acknum);
+  }
+  else if (ack_packet.acknum == A_ent.last_ack)
+  {
+    printf("  A_input: recv duplicate ACK (ack=%d)\n", ack_packet.acknum);
+    // Retransmit first outstanding packet
+    struct pkt *packet = A_ent.packet_buffer[A_ent.window_start % BUFSIZE];
+    tolayer3(A, *packet);
+    num_retransmissions++;
+    printf("  A_input: retransmit packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+    restart_rxmt_timer();
+  }
+  else
+  {
+    printf("  A_input: recv ACK (ack=%d)\n", ack_packet.acknum);
+    A_ent.last_ack = ack_packet.acknum;
+    A_ent.packet_buffer[(A_ent.window_start + ack_packet.acknum) % BUFSIZE] = NULL;
+
+    // Close window
+    while (A_ent.packet_buffer[A_ent.window_start % BUFSIZE] == NULL)
+    {
+      A_ent.window_start++;
+    }
+
+    // Send any new packets waiting in the buffer
+    send_window();
+  }
 }
 
 /* called when A's timer goes off */
 void A_timerinterrupt(void)
 {
+  // Retransmit all outstanding packets
+  for (int i = A_ent.window_start; i < A_ent.send_next; i++)
+  {
+    struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
+    if (packet)
+    {
+      tolayer3(A, *packet);
+      num_retransmissions++;
+      printf("  A_timerinterrupt: retransmit packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+    }
+  }
+  starttimer(A, RXMT_TIMEOUT);
 }
 
 /* the following routine will be called once (only) before any other */
 /* entity A routines are called. You can use it to do any initialization */
 void A_init(void)
 {
+  A_ent.window_start = FIRST_SEQNO;
+  A_ent.send_next = FIRST_SEQNO;
+  A_ent.buffer_next = FIRST_SEQNO;
+  A_ent.last_ack = -1;
 }
 
 /* called from layer 3, when a packet arrives for layer 4 at B*/
-void
-    B_input(packet) struct pkt packet;
+void B_input(struct pkt packet)
 {
+  num_delivered++;
+  if (packet.checksum != get_checksum(&packet))
+  {
+    num_corrupted++;
+    printf("  B_input: recv corrupted packet (seq=%d): %s\n", packet.seqnum, packet.payload);
+  }
 }
 
-/* the following rouytine will be called once (only) before any other */
+/* the following routine will be called once (only) before any other */
 /* entity B routines are called. You can use it to do any initialization */
 void B_init(void)
 {
 }
 
+void restart_rxmt_timer(void)
+{
+  stoptimer(A);
+  starttimer(A, RXMT_TIMEOUT);
+}
+
 /* called at end of simulation to print final statistics */
 void Simulation_done()
 {
+  int num_transmitted = num_original_transmitted + num_retransmissions;
+  int num_lost = num_transmitted + num_ack_sent - num_delivered - num_ack_received;
   /* TO PRINT THE STATISTICS, FILL IN THE DETAILS BY PUTTING VARIBALE NAMES. DO NOT CHANGE THE FORMAT OF PRINTED OUTPUT */
   printf("\n\n===============STATISTICS======================= \n\n");
-  printf("Number of original packets transmitted by A: <YourVariableHere> \n");
-  printf("Number of retransmissions by A: <YourVariableHere> \n");
-  printf("Number of data packets delivered to layer 5 at B: <YourVariableHere> \n");
-  printf("Number of ACK packets sent by B: <YourVariableHere> \n");
-  printf("Number of corrupted packets: <YourVariableHere> \n");
-  printf("Ratio of lost packets: <YourVariableHere> \n");
-  printf("Ratio of corrupted packets: <YourVariableHere> \n");
-  printf("Average RTT: <YourVariableHere> \n");
-  printf("Average communication time: <YourVariableHere> \n");
+  printf("Number of original packets transmitted by A: %d \n", num_original_transmitted);
+  printf("Number of retransmissions by A: %d \n", num_retransmissions);
+  printf("Number of data packets delivered to layer 5 at B: %d \n", num_delivered);
+  printf("Number of ACK packets sent by B: %d \n", num_ack_sent);
+  printf("Number of corrupted packets: %d \n", num_corrupted);
+  printf("Ratio of lost packets: %d \n", num_lost / (num_delivered + num_ack_sent));
+  printf("Ratio of corrupted packets: %d \n", num_corrupted / (num_delivered + num_ack_sent));
+  printf("Average RTT: %d \n");
+  printf("Average communication time: %d \n");
   printf("==================================================");
 
   /* PRINT YOUR OWN STATISTIC HERE TO CHECK THE CORRECTNESS OF YOUR PROGRAM */
   printf("\nEXTRA: \n");
   /* EXAMPLE GIVEN BELOW */
-  /* printf("Example statistic you want to check e.g. number of ACK packets received by A : <YourVariableHere>"); */
+  printf("Number of ACK packets received by A: %d \n", num_ack_received);
 }
 
 /*****************************************************************
