@@ -140,7 +140,7 @@ void A_output(struct msg message)
   struct pkt *packet = A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE];
   packet->seqnum = A_ent.send_next % LIMIT_SEQNO;
   memmove(packet->payload, message.data, 20);
-  packet->checksum = get_checksum(&packet);
+  packet->checksum = get_checksum(packet);
   A_ent.buffer_next = (A_ent.buffer_next + 1) % BUFSIZE;
   send_window();
 }
@@ -245,8 +245,8 @@ void Simulation_done()
   printf("Number of corrupted packets: %d \n", num_corrupted);
   printf("Ratio of lost packets: %d \n", num_lost / (num_delivered + num_ack_sent));
   printf("Ratio of corrupted packets: %d \n", num_corrupted / (num_delivered + num_ack_sent));
-  printf("Average RTT: %d \n");
-  printf("Average communication time: %d \n");
+  printf("Average RTT: \n");
+  printf("Average communication time: \n");
   printf("==================================================");
 
   /* PRINT YOUR OWN STATISTIC HERE TO CHECK THE CORRECTNESS OF YOUR PROGRAM */

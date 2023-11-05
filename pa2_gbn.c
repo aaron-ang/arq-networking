@@ -75,14 +75,12 @@ extern double time_now;     // simulation time, for your debug purpose
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
 /* called from layer 5, passed the data to be sent to other side */
-void
-    A_output(message) struct msg message;
+void A_output(struct msg message)
 {
 }
 
 /* called from layer 3, when a packet arrives for layer 4 */
-void
-    A_input(packet) struct pkt packet;
+void A_input(struct pkt ack_packet)
 {
 }
 
@@ -98,8 +96,7 @@ void A_init(void)
 }
 
 /* called from layer 3, when a packet arrives for layer 4 at B*/
-void
-    B_input(packet) struct pkt packet;
+void B_input(struct pkt packet)
 {
 }
 

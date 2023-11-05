@@ -19,5 +19,6 @@
 
 #
 # Compilation commands:
-gcc -g pa2_gbn.c -o pa2_gbn
-gcc -g pa2_sr.c -o pa2_sr
+mkdir -p out
+gcc -g pa2_gbn.c -o out/pa2_gbn
+gcc -g pa2_sr.c -o out/pa2_sr
