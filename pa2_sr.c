@@ -101,14 +101,14 @@ int num_ack_sent = 0;
 int num_ack_received = 0;
 int num_corrupted = 0;
 
-int get_checksum(struct pkt *packet)
+int get_checksum(struct pkt packet)
 {
   int checksum = 0;
-  checksum += packet->seqnum;
-  checksum += packet->acknum;
+  checksum += packet.seqnum;
+  checksum += packet.acknum;
   for (int i = 0; i < 20; i++)
   {
-    checksum += packet->payload[i];
+    checksum += packet.payload[i];
   }
   return checksum;
 }
@@ -119,41 +119,59 @@ void send_window(void)
   while (A_ent.send_next < A_ent.buffer_next && A_ent.send_next < A_ent.window_start + WINDOW_SIZE)
   {
     struct pkt *packet = A_ent.packet_buffer[A_ent.send_next % BUFSIZE];
+    printf("  send_window: send packet (seq=%d): %s\n", packet->seqnum, packet->payload);
     tolayer3(A, *packet);
     sent = true;
     num_original_transmitted++;
-    printf("  send_window: send packet (seq=%d): %s\n", packet->seqnum, packet->payload);
     A_ent.send_next++;
   }
   if (sent)
     restart_rxmt_timer();
 }
 
-void send_ack(int acknum)
+void deliver_data(void)
 {
+  struct pkt *packet = B_ent.packet_buffer[B_ent.window_start % BUFSIZE];
+  if (packet)
+  {
+    // Deliver subsequent data packets waiting in the buffer
+    printf("  deliver_data: delivering subsequent data packets (window_start_seqnum=%d)\n", packet->seqnum);
+    do
+    {
+      tolayer5(packet->payload);
+      num_delivered++;
+      free(packet);
+      B_ent.packet_buffer[B_ent.window_start % BUFSIZE] = NULL;
+      B_ent.window_start++;
+      packet = B_ent.packet_buffer[B_ent.window_start % BUFSIZE];
+    } while (packet);
+    printf("  deliver_data: delivered subsequent data packets (window_start_seqnum=%d)\n", B_ent.window_start % LIMIT_SEQNO);
+  }
+}
+
+void send_ack()
+{
+  int acknum = B_ent.window_start % LIMIT_SEQNO;
   B_ent.ack_pkt.acknum = acknum;
-  B_ent.ack_pkt.checksum = get_checksum(&B_ent.ack_pkt);
+  B_ent.ack_pkt.checksum = get_checksum(B_ent.ack_pkt);
+  printf("  send_ack: send ACK (ack=%d)\n", acknum);
   tolayer3(B, B_ent.ack_pkt);
   num_ack_sent++;
 }
 
+void print_packet(struct pkt *packet)
+{
+  packet ? printf(" %d", packet->seqnum) : printf(" -");
+}
+
 void print_window(int AorB)
 {
-  char window[WINDOW_SIZE];
-  for (int i = 0; i < WINDOW_SIZE; i++)
-  {
-    window[i] = 'X';
-  }
   if (AorB == A)
   {
     printf("  A_window:");
     for (int i = A_ent.window_start; i < A_ent.window_start + WINDOW_SIZE; i++)
     {
-      struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
-      if (packet)
-      {
-        window[i - A_ent.window_start] = packet->seqnum + '0';
-      }
+      print_packet(A_ent.packet_buffer[i % BUFSIZE]);
     }
   }
   else
@@ -161,14 +179,10 @@ void print_window(int AorB)
     printf("  B_window:");
     for (int i = B_ent.window_start; i < B_ent.window_start + WINDOW_SIZE; i++)
     {
-      struct pkt *packet = B_ent.packet_buffer[i % BUFSIZE];
-      if (packet)
-      {
-        window[i - B_ent.window_start] = packet->seqnum + '0';
-      }
+      print_packet(B_ent.packet_buffer[i % BUFSIZE]);
     }
   }
-  printf(" %s\n", window);
+  printf("\n");
 }
 
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
@@ -186,7 +200,7 @@ void A_output(struct msg message)
   packet = (struct pkt *)malloc(sizeof(struct pkt));
   packet->seqnum = A_ent.send_next % LIMIT_SEQNO;
   memmove(packet->payload, message.data, 20);
-  packet->checksum = get_checksum(packet);
+  packet->checksum = get_checksum(*packet);
   A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE] = packet;
   A_ent.buffer_next++;
   send_window();
@@ -197,54 +211,46 @@ void A_input(struct pkt ack_packet)
 {
   print_window(A);
   num_ack_received++;
-  if (ack_packet.checksum != get_checksum(&ack_packet))
+
+  if (ack_packet.checksum != get_checksum(ack_packet))
   {
     num_corrupted++;
     printf("  A_input: recv corrupted ACK\n");
+    return;
   }
-  else if (ack_packet.acknum == A_ent.last_ack) // TODO: use last_ack or check if corresponding packet in window is null?
+
+  if (ack_packet.acknum == A_ent.last_ack)
   {
     printf("  A_input: Case4 -> recv duplicate ACK (ack=%d)\n", ack_packet.acknum);
     // Retransmit first outstanding packet
-    struct pkt *packet = A_ent.packet_buffer[A_ent.window_start % BUFSIZE];
-    tolayer3(A, *packet);
-    num_retransmissions++;
-    printf("  A_input: retransmit packet (seq=%d): %s\n", packet->seqnum, packet->payload);
-    restart_rxmt_timer();
-  }
-  else
-  {
-    printf("  A_input: recv ACK (ack=%d)\n", ack_packet.acknum);
-    A_ent.last_ack = ack_packet.acknum;
-    // Find position of outstanding packet in buffer
-    int i = A_ent.window_start;
-    int cur_seqnum = i % LIMIT_SEQNO;
-    while (i < A_ent.send_next && cur_seqnum != ack_packet.acknum)
+    struct pkt *first_packet = A_ent.packet_buffer[A_ent.window_start % BUFSIZE];
+    if (first_packet)
     {
-      i++;
-      cur_seqnum = i % LIMIT_SEQNO;
+      printf("  A_input: retransmit packet (seq=%d): %s\n", first_packet->seqnum, first_packet->payload);
+      tolayer3(A, *first_packet);
+      num_retransmissions++;
+      restart_rxmt_timer();
     }
-    // Free outstanding packet
+    return;
+  }
+
+  printf("  A_input: recv new ACK (ack=%d)\n", ack_packet.acknum);
+  A_ent.last_ack = ack_packet.acknum;
+
+  // Move window forward
+  printf("  A_input: moving window (window_start=%d, send_next=%d)\n", A_ent.window_start, A_ent.send_next);
+  int i = A_ent.window_start;
+  for (; i < A_ent.send_next && i % LIMIT_SEQNO != ack_packet.acknum; i++)
+  {
     struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
     free(packet);
     A_ent.packet_buffer[i % BUFSIZE] = NULL;
-
-    // Move window forward
-    if (A_ent.window_start == i)
-    {
-      printf("  A_input: moving window (window_start=%d, send_next=%d)\n", A_ent.window_start, A_ent.send_next);
-      while (A_ent.window_start < A_ent.send_next && A_ent.packet_buffer[A_ent.window_start % BUFSIZE] == NULL)
-      {
-        A_ent.window_start++;
-      }
-      printf("  A_input: moved window (window_start=%d, send_next=%d)\n", A_ent.window_start, A_ent.send_next);
-      if (A_ent.window_start - i > 1)
-        printf("  A_input: Case5 -> moved window by %d\n", A_ent.window_start - i);
-    }
-
-    // Send any new packets waiting in the buffer
-    send_window();
   }
+  printf("  A_input: moved window by %d (window_start=%d, send_next=%d)\n", i - A_ent.window_start, i, A_ent.send_next);
+  A_ent.window_start = i;
+
+  // Send any new packets waiting in the buffer
+  send_window();
 }
 
 /* called when A's timer goes off */
@@ -257,10 +263,10 @@ void A_timerinterrupt(void)
     struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
     if (packet)
     {
-      tolayer3(A, *packet);
-      sent = true;
-      num_retransmissions++;
       printf("  A_timerinterrupt: Case3 -> retransmit packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+      tolayer3(A, *packet);
+      num_retransmissions++;
+      sent = true;
     }
   }
   if (sent)
@@ -280,36 +286,24 @@ void A_init(void)
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
-  num_delivered++;
-  if (packet.checksum != get_checksum(&packet))
+  struct pkt *buf_packet;
+  int cur_seqnum = B_ent.window_start % LIMIT_SEQNO;
+
+  if (packet.checksum != get_checksum(packet))
   {
     num_corrupted++;
     printf("  B_input: recv corrupted packet\n");
-    return;
   }
-
-  int cur_seqnum = B_ent.window_start % LIMIT_SEQNO;
-  if (cur_seqnum == packet.seqnum)
+  else if (cur_seqnum == packet.seqnum) // In-order packet
   {
     printf("  B_input: recv in-order packet (seq=%d): %s\n", packet.seqnum, packet.payload);
-    send_ack(packet.seqnum);
-    B_ent.window_start++;
-    if (B_ent.packet_buffer[B_ent.window_start % BUFSIZE])
-    {
-      // Deliver subsequent data packets waiting in the buffer
-      printf("  B_input: delivering subsequent data packets (window_start=%d)\n", B_ent.window_start);
-      do
-      {
-        struct pkt *packet = B_ent.packet_buffer[B_ent.window_start % BUFSIZE];
-        tolayer5(packet->payload);
-        free(packet);
-        B_ent.packet_buffer[B_ent.window_start % BUFSIZE] = NULL;
-        B_ent.window_start++;
-      } while (B_ent.packet_buffer[B_ent.window_start % BUFSIZE]);
-      printf("  B_input: delivered subsequent data packets (window_start=%d)\n", B_ent.window_start);
-    }
+    buf_packet = (struct pkt *)malloc(sizeof(struct pkt));
+    buf_packet->seqnum = packet.seqnum;
+    memmove(buf_packet->payload, packet.payload, 20);
+    B_ent.packet_buffer[B_ent.window_start % BUFSIZE] = buf_packet;
+    deliver_data();
   }
-  else
+  else // Out-of-order packet
   {
     // Find position of received packet in buffer
     int i = B_ent.window_start + 1;
@@ -319,17 +313,14 @@ void B_input(struct pkt packet)
       i++;
       cur_seqnum = i % LIMIT_SEQNO;
     }
+
     if (cur_seqnum != packet.seqnum)
     {
       printf("  B_input: recv seqnum outside of window (seq=%d)\n", packet.seqnum);
-      send_ack(packet.seqnum);
-      return;
     }
-    struct pkt *buf_packet = B_ent.packet_buffer[i % BUFSIZE];
-    if (buf_packet)
+    else if (B_ent.packet_buffer[i % BUFSIZE])
     {
       printf("  B_input: recv duplicate packet (seq=%d): %s\n", buf_packet->seqnum, buf_packet->payload);
-      send_ack(buf_packet->seqnum);
     }
     else
     {
@@ -338,10 +329,12 @@ void B_input(struct pkt packet)
       buf_packet->seqnum = packet.seqnum;
       memmove(buf_packet->payload, packet.payload, 20);
       B_ent.packet_buffer[i % BUFSIZE] = buf_packet;
-      send_ack(packet.seqnum);
     }
     print_window(B);
   }
+
+  // Send ACK for expected packet
+  send_ack();
 }
 
 /* the following routine will be called once (only) before any other */
@@ -361,8 +354,8 @@ void restart_rxmt_timer(void)
 /* called at end of simulation to print final statistics */
 void Simulation_done()
 {
-  double lost_ratio = (num_retransmissions - num_corrupted) / (num_original_transmitted + num_retransmissions + num_ack_sent);
-  double corrupted_ratio = num_corrupted / (num_original_transmitted + num_retransmissions + num_ack_sent - (num_retransmissions - num_corrupted));
+  double lost_ratio = (double)(num_retransmissions - num_corrupted) / (num_original_transmitted + num_retransmissions + num_ack_sent);
+  double corrupted_ratio = (double)num_corrupted / (num_original_transmitted + num_retransmissions + num_ack_sent - (num_retransmissions - num_corrupted));
   /* TO PRINT THE STATISTICS, FILL IN THE DETAILS BY PUTTING VARIBALE NAMES. DO NOT CHANGE THE FORMAT OF PRINTED OUTPUT */
   printf("\n\n===============STATISTICS======================= \n\n");
   printf("Number of original packets transmitted by A: %d \n", num_original_transmitted);
