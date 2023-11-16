@@ -177,10 +177,16 @@ void print_window(int AorB)
 
 bool insert_sack(struct pkt packet)
 {
+  int sack_start = B_ent.window_start + 1;
   for (int i = 0; i < 5; i++)
   {
-    if ((B_ent.window_start + 1 + i) % LIMIT_SEQNO == packet.seqnum)
+    if ((sack_start + i) % LIMIT_SEQNO == packet.seqnum)
     {
+      if (B_ent.ack_pkt.sack[i] >= 0)
+      {
+        printf("  insert_sack: duplicate SACK (seq=%d)\n", packet.seqnum);
+        return false;
+      }
       printf("  insert_sack: deliver packet and insert SACK (seq=%d)\n", packet.seqnum);
       tolayer5(packet.payload);
       num_delivered++;
@@ -191,17 +197,34 @@ bool insert_sack(struct pkt packet)
   return false;
 }
 
-int next_window_offset(void)
+int sack_offset(void)
 {
   int i;
   for (i = 4; i >= 0; i--)
   {
     if (B_ent.ack_pkt.sack[i] >= 0)
     {
-      break;
+      return i + 1;
     }
   }
-  return i + 1;
+  return 0;
+}
+
+void record_time_measurement(int i)
+{
+  struct timespec *packet_start = A_ent.packet_timer[i % BUFSIZE];
+  double measurement_time = (stop.tv_sec - packet_start->tv_sec) * 1000 + (stop.tv_nsec - packet_start->tv_nsec) / 1000000.0;
+  free(packet_start);
+  A_ent.packet_timer[i % BUFSIZE] = NULL;
+
+  comm_time_sum += measurement_time;
+  comm_time_count++;
+  if (!A_ent.retransmitted[i % BUFSIZE])
+  {
+    rtt_sum += measurement_time;
+    rtt_count++;
+  }
+  A_ent.retransmitted[i % BUFSIZE] = false;
 }
 
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
@@ -238,28 +261,27 @@ void A_input(struct pkt ack_packet)
     return;
   }
 
+  clock_gettime(CLOCK_MONOTONIC_RAW, &stop);
   printf("  A_input: recv ACK (ack=%d)\n", ack_packet.acknum);
+
   if (ack_packet.acknum == A_ent.window_start % LIMIT_SEQNO) // ACK = window_start seqnum -> process SACK and retransmit unACKed packets
   {
-    int i = A_ent.window_start;
-    for (int j = i - A_ent.window_start; i < A_ent.send_next && j < 5; i++)
+    for (int i = A_ent.window_start + 1, j = 0; i < A_ent.send_next && j < 5; i++, j++)
     {
       int sack = ack_packet.sack[j];
-      struct pkt *packet = A_ent.packet_buffer[(i + 1) % BUFSIZE];
-      if (sack >= 0)
+      struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
+      if (sack >= 0 && packet)
       {
         printf("  A_input: recv SACK (seq=%d)\n", sack);
-        if (packet)
-        {
-          free(packet);
-          A_ent.packet_buffer[(i + 1) % BUFSIZE] = NULL;
-        }
+        free(packet);
+        A_ent.packet_buffer[i % BUFSIZE] = NULL;
+        record_time_measurement(i);
       }
-      else
+      else if (packet)
       {
         printf("  A_input: retransmit unACKed packet (seq=%d): %s\n", packet->seqnum, packet->payload);
         tolayer3(A, *packet);
-        A_ent.retransmitted[(i + 1) % BUFSIZE] = true;
+        A_ent.retransmitted[i % BUFSIZE] = true;
         num_retransmissions++;
         restart_rxmt_timer();
       }
@@ -276,6 +298,7 @@ void A_input(struct pkt ack_packet)
     {
       free(packet);
       A_ent.packet_buffer[i % BUFSIZE] = NULL;
+      record_time_measurement(i);
     }
   }
   int diff = i - A_ent.window_start;
@@ -331,7 +354,7 @@ void B_input(struct pkt packet)
     printf("  B_input: recv out-of-order packet (seq=%d): %s\n", packet.seqnum, packet.payload);
     if (!insert_sack(packet))
     {
-      printf("  B_input: recv duplicate packet (seq=%d): %s\n", packet.seqnum, packet.payload);
+      printf("  B_input: drop packet (seq=%d): %s\n", packet.seqnum, packet.payload);
     }
   }
   else
@@ -339,7 +362,8 @@ void B_input(struct pkt packet)
     printf("  B_input: recv packet (seq=%d): %s\n", packet.seqnum, packet.payload);
     tolayer5(packet.payload);
     num_delivered++;
-    B_ent.window_start += 1 + next_window_offset();
+    B_ent.window_start++;
+    B_ent.window_start += sack_offset();
     memset(B_ent.ack_pkt.sack, -1, sizeof(B_ent.ack_pkt.sack));
   }
   print_window(B);
