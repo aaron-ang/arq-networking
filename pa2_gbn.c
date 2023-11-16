@@ -125,15 +125,15 @@ void send_window(void)
   if (A_ent.send_next == A_ent.buffer_next || A_ent.send_next == A_ent.window_start + WINDOW_SIZE)
     return;
 
-  restart_rxmt_timer();
-
+  starttimer(A, RXMT_TIMEOUT);
   while (A_ent.send_next < A_ent.buffer_next && A_ent.send_next < A_ent.window_start + WINDOW_SIZE)
   {
     struct pkt *packet = A_ent.packet_buffer[A_ent.send_next % BUFSIZE];
     struct timespec *packet_start = (struct timespec *)malloc(sizeof(struct timespec));
     A_ent.packet_timer[A_ent.send_next % BUFSIZE] = packet_start;
     clock_gettime(CLOCK_MONOTONIC_RAW, packet_start);
-    printf("  send_window: send packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+    printf("  send_window: send packet (seq=%d): %s\n",
+           packet->seqnum, packet->payload);
     tolayer3(A, *packet);
     num_original_transmitted++;
     A_ent.send_next++;
@@ -213,7 +213,8 @@ int sack_offset(void)
 void record_time_measurement(int i)
 {
   struct timespec *packet_start = A_ent.packet_timer[i % BUFSIZE];
-  double measurement_time = (stop.tv_sec - packet_start->tv_sec) * 1000 + (stop.tv_nsec - packet_start->tv_nsec) / 1000000.0;
+  double measurement_time = (stop.tv_sec - packet_start->tv_sec) * 1000 +
+                            (stop.tv_nsec - packet_start->tv_nsec) / 1000000.0;
   free(packet_start);
   A_ent.packet_timer[i % BUFSIZE] = NULL;
 
@@ -232,7 +233,8 @@ void record_time_measurement(int i)
 /* called from layer 5, passed the data to be sent to other side */
 void A_output(struct msg message)
 {
-  printf("  A_output: buffer packet (seq=%d): %s\n", A_ent.buffer_next % LIMIT_SEQNO, message.data);
+  printf("  A_output: buffer packet (seq=%d): %s\n",
+         A_ent.buffer_next % LIMIT_SEQNO, message.data);
   struct pkt *packet = A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE];
   if (packet)
   {
@@ -264,26 +266,36 @@ void A_input(struct pkt ack_packet)
   clock_gettime(CLOCK_MONOTONIC_RAW, &stop);
   printf("  A_input: recv ACK (ack=%d)\n", ack_packet.acknum);
 
-  if (ack_packet.acknum == A_ent.window_start % LIMIT_SEQNO) // ACK = window_start seqnum -> process SACK and retransmit unACKed packets
+  if (ack_packet.acknum == A_ent.window_start % LIMIT_SEQNO)
   {
-    for (int i = A_ent.window_start + 1, j = 0; i < A_ent.send_next && j < 5; i++, j++)
+    // process SACKs
+    for (int i = 0, j = A_ent.window_start + 1; i < 5 && j < A_ent.send_next; i++, j++)
     {
-      int sack = ack_packet.sack[j];
-      struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
+      int sack = ack_packet.sack[i];
+      struct pkt *packet = A_ent.packet_buffer[j % BUFSIZE];
       if (sack >= 0 && packet)
       {
         printf("  A_input: recv SACK (seq=%d)\n", sack);
         free(packet);
-        A_ent.packet_buffer[i % BUFSIZE] = NULL;
-        record_time_measurement(i);
+        A_ent.packet_buffer[j % BUFSIZE] = NULL;
+        record_time_measurement(j);
       }
-      else if (packet)
+    }
+    // retransmit unACKed packets
+    if (A_ent.window_start < A_ent.send_next)
+    {
+      restart_rxmt_timer();
+      for (int i = A_ent.window_start; i < A_ent.send_next; i++)
       {
-        printf("  A_input: retransmit unACKed packet (seq=%d): %s\n", packet->seqnum, packet->payload);
-        tolayer3(A, *packet);
-        A_ent.retransmitted[i % BUFSIZE] = true;
-        num_retransmissions++;
-        restart_rxmt_timer();
+        struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
+        if (packet)
+        {
+          printf("  A_input: retransmit unACKed packet (seq=%d): %s\n",
+                 packet->seqnum, packet->payload);
+          tolayer3(A, *packet);
+          A_ent.retransmitted[i % BUFSIZE] = true;
+          num_retransmissions++;
+        }
       }
     }
     return;
@@ -304,12 +316,16 @@ void A_input(struct pkt ack_packet)
   int diff = i - A_ent.window_start;
   if (diff > 0)
   {
-    printf("  A_input: moved window by %d (window_start=%d, send_next=%d)\n", diff, i, A_ent.send_next);
+    printf("  A_input: moved window by %d (window_start=%d, send_next=%d)\n",
+           diff, i % LIMIT_SEQNO, A_ent.send_next % LIMIT_SEQNO);
     A_ent.window_start = i;
   }
-
-  // Send any new packets waiting in the buffer
-  send_window();
+  if (A_ent.window_start == A_ent.send_next)
+  {
+    stoptimer(A);
+    // Send any new packets waiting in the buffer
+    send_window();
+  }
 }
 
 /* called when A's timer goes off */
@@ -324,7 +340,8 @@ void A_timerinterrupt(void)
     struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
     if (packet)
     {
-      printf("  A_timerinterrupt: Case3 -> retransmit packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+      printf("  A_timerinterrupt: Case3 -> retransmit packet (seq=%d): %s\n",
+             packet->seqnum, packet->payload);
       tolayer3(A, *packet);
       A_ent.retransmitted[i % BUFSIZE] = true;
       num_retransmissions++;
@@ -351,15 +368,18 @@ void B_input(struct pkt packet)
   }
   else if (packet.seqnum != B_ent.window_start % LIMIT_SEQNO)
   {
-    printf("  B_input: recv out-of-order packet (seq=%d): %s\n", packet.seqnum, packet.payload);
+    printf("  B_input: recv out-of-order packet (seq=%d): %s\n",
+           packet.seqnum, packet.payload);
     if (!insert_sack(packet))
     {
-      printf("  B_input: drop packet (seq=%d): %s\n", packet.seqnum, packet.payload);
+      printf("  B_input: drop packet (seq=%d): %s\n",
+             packet.seqnum, packet.payload);
     }
   }
   else
   {
-    printf("  B_input: recv packet (seq=%d): %s\n", packet.seqnum, packet.payload);
+    printf("  B_input: recv packet (seq=%d): %s\n",
+           packet.seqnum, packet.payload);
     tolayer5(packet.payload);
     num_delivered++;
     B_ent.window_start++;
@@ -388,8 +408,10 @@ void restart_rxmt_timer(void)
 /* called at end of simulation to print final statistics */
 void Simulation_done()
 {
-  double lost_ratio = (double)(num_retransmissions - num_corrupted) / (num_original_transmitted + num_retransmissions + num_ack_sent);
-  double corrupted_ratio = (double)num_corrupted / (num_original_transmitted + num_retransmissions + num_ack_sent - (num_retransmissions - num_corrupted));
+  double lost_ratio = (double)(num_retransmissions - num_corrupted) /
+                      (num_original_transmitted + num_retransmissions + num_ack_sent);
+  double corrupted_ratio = (double)num_corrupted /
+                           (num_original_transmitted + num_retransmissions + num_ack_sent - (num_retransmissions - num_corrupted));
   /* TO PRINT THE STATISTICS, FILL IN THE DETAILS BY PUTTING VARIBALE NAMES. DO NOT CHANGE THE FORMAT OF PRINTED OUTPUT */
   printf("\n\n===============STATISTICS======================= \n\n");
   printf("Number of original packets transmitted by A: %d \n", num_original_transmitted);
