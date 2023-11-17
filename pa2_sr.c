@@ -322,9 +322,6 @@ void A_init(void)
 /* called from layer 3, when a packet arrives for layer 4 at B*/
 void B_input(struct pkt packet)
 {
-  struct pkt *buf_packet;
-  int cur_seqnum = B_ent.window_start % LIMIT_SEQNO;
-
   if (packet.checksum != get_checksum(packet))
   {
     num_corrupted++;
@@ -333,6 +330,8 @@ void B_input(struct pkt packet)
   }
 
   print_window(B);
+
+  int cur_seqnum = B_ent.window_start % LIMIT_SEQNO;
   if (cur_seqnum == packet.seqnum) // In-order packet
   {
     printf("  B_input: recv in-order packet (seq=%d): %s\n",
@@ -356,9 +355,11 @@ void B_input(struct pkt packet)
     if (i >= B_ent.window_start + WINDOW_SIZE || cur_seqnum != packet.seqnum)
     {
       printf("  B_input: recv seqnum outside of window (seq=%d)\n", packet.seqnum);
+      send_ack();
       return;
     }
 
+    struct pkt *buf_packet;
     if (B_ent.packet_buffer[i % BUFSIZE])
     {
       buf_packet = B_ent.packet_buffer[i % BUFSIZE];
