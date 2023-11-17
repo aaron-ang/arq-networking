@@ -60,6 +60,8 @@ void tolayer5(char datasent[20]);
 void starttimer(int AorB, double increment);
 void stoptimer(int AorB);
 
+void Simulation_done(void);
+
 /* WINDOW_SIZE, RXMT_TIMEOUT and TRACE are inputs to the program;
    Please set an appropriate value for LIMIT_SEQNO.
    You have to use these variables in your
@@ -126,7 +128,7 @@ void send_window(void)
   if (A_ent.send_next == A_ent.buffer_next || A_ent.send_next == A_ent.window_start + WINDOW_SIZE)
     return;
 
-  starttimer(A, RXMT_TIMEOUT);
+  restart_rxmt_timer();
 
   while (A_ent.send_next < A_ent.buffer_next && A_ent.send_next < A_ent.window_start + WINDOW_SIZE)
   {
@@ -198,6 +200,25 @@ void print_window(int AorB)
   printf("\n");
 }
 
+void retransmit_first_outstanding_packet(void)
+{
+  int i = A_ent.window_start;
+  while (i < A_ent.send_next && !A_ent.packet_buffer[i % BUFSIZE])
+  {
+    i++;
+  }
+  struct pkt *first_packet = A_ent.packet_buffer[i % BUFSIZE];
+  if (first_packet)
+  {
+    printf("retransmit first outstanding packet (seq=%d): %s\n",
+           first_packet->seqnum, first_packet->payload);
+    A_ent.retransmitted[i % BUFSIZE] = true;
+    num_retransmissions++;
+    restart_rxmt_timer();
+    tolayer3(A, *first_packet);
+  }
+}
+
 /********* STUDENTS WRITE THE NEXT SEVEN ROUTINES *********/
 
 /* called from layer 5, passed the data to be sent to other side */
@@ -209,10 +230,11 @@ void A_output(struct msg message)
   if (packet)
   {
     printf("  A_output: buffer full\n");
+    Simulation_done();
     exit(1);
   }
   packet = (struct pkt *)malloc(sizeof(struct pkt));
-  packet->seqnum = A_ent.send_next % LIMIT_SEQNO;
+  packet->seqnum = A_ent.buffer_next % LIMIT_SEQNO;
   memmove(packet->payload, message.data, 20);
   packet->checksum = get_checksum(*packet);
   A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE] = packet;
@@ -236,18 +258,7 @@ void A_input(struct pkt ack_packet)
   if (ack_packet.acknum == A_ent.last_ack)
   {
     printf("  A_input: Case4 -> recv duplicate ACK (ack=%d)\n", ack_packet.acknum);
-    // Retransmit first outstanding packet
-    struct pkt *first_packet = A_ent.packet_buffer[A_ent.window_start % BUFSIZE];
-    if (first_packet)
-    {
-      restart_rxmt_timer();
-      printf("  A_input: retransmit packet (seq=%d): %s\n",
-             first_packet->seqnum, first_packet->payload);
-      tolayer3(A, *first_packet);
-      A_ent.retransmitted[A_ent.window_start % BUFSIZE] = true;
-      num_retransmissions++;
-    }
-    return;
+    retransmit_first_outstanding_packet();
   }
 
   clock_gettime(CLOCK_MONOTONIC_RAW, &stop);
@@ -282,10 +293,6 @@ void A_input(struct pkt ack_packet)
     printf("  A_input: moved window by %d (window_start=%d, send_next=%d)\n",
            diff, i % LIMIT_SEQNO, A_ent.send_next % LIMIT_SEQNO);
     A_ent.window_start = i;
-  }
-  if (A_ent.window_start == A_ent.send_next)
-  {
-    stoptimer(A);
     // Send any new packets waiting in the buffer
     send_window();
   }
@@ -297,19 +304,9 @@ void A_timerinterrupt(void)
   if (A_ent.window_start == A_ent.send_next)
     return;
 
-  starttimer(A, RXMT_TIMEOUT);
-  for (int i = A_ent.window_start; i < A_ent.send_next; i++)
-  {
-    struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
-    if (packet)
-    {
-      printf("  A_timerinterrupt: Case3 -> retransmit packet (seq=%d): %s\n",
-             packet->seqnum, packet->payload);
-      tolayer3(A, *packet);
-      A_ent.retransmitted[i % BUFSIZE] = true;
-      num_retransmissions++;
-    }
-  }
+  printf("  A_timerinterrupt: timeout (window_start=%d, send_next=%d)\n",
+         A_ent.window_start % LIMIT_SEQNO, A_ent.send_next % LIMIT_SEQNO);
+  retransmit_first_outstanding_packet();
 }
 
 /* the following routine will be called once (only) before any other */
@@ -332,8 +329,11 @@ void B_input(struct pkt packet)
   {
     num_corrupted++;
     printf("  B_input: recv corrupted packet\n");
+    return;
   }
-  else if (cur_seqnum == packet.seqnum) // In-order packet
+
+  print_window(B);
+  if (cur_seqnum == packet.seqnum) // In-order packet
   {
     printf("  B_input: recv in-order packet (seq=%d): %s\n",
            packet.seqnum, packet.payload);
@@ -353,26 +353,26 @@ void B_input(struct pkt packet)
       cur_seqnum = i % LIMIT_SEQNO;
     }
 
-    if (cur_seqnum != packet.seqnum)
+    if (i >= B_ent.window_start + WINDOW_SIZE || cur_seqnum != packet.seqnum)
     {
       printf("  B_input: recv seqnum outside of window (seq=%d)\n", packet.seqnum);
+      return;
     }
-    else if (B_ent.packet_buffer[i % BUFSIZE])
+
+    if (B_ent.packet_buffer[i % BUFSIZE])
     {
       buf_packet = B_ent.packet_buffer[i % BUFSIZE];
       printf("  B_input: recv duplicate packet (seq=%d): %s\n",
              buf_packet->seqnum, buf_packet->payload);
+      return;
     }
-    else
-    {
-      printf("  B_input: recv new, out-of-order packet (seq=%d): %s\n",
-             packet.seqnum, packet.payload);
-      buf_packet = (struct pkt *)malloc(sizeof(struct pkt));
-      buf_packet->seqnum = packet.seqnum;
-      memmove(buf_packet->payload, packet.payload, 20);
-      B_ent.packet_buffer[i % BUFSIZE] = buf_packet;
-    }
-    print_window(B);
+
+    printf("  B_input: recv new, out-of-order packet (seq=%d): %s\n",
+           packet.seqnum, packet.payload);
+    buf_packet = (struct pkt *)malloc(sizeof(struct pkt));
+    buf_packet->seqnum = packet.seqnum;
+    memmove(buf_packet->payload, packet.payload, 20);
+    B_ent.packet_buffer[i % BUFSIZE] = buf_packet;
   }
 
   // Send ACK for expected packet
