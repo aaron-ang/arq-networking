@@ -61,6 +61,8 @@ void tolayer5(char datasent[20]);
 void starttimer(int AorB, double increment);
 void stoptimer(int AorB);
 
+void Simulation_done(void);
+
 /* WINDOW_SIZE, RXMT_TIMEOUT and TRACE are inputs to the program;
    Please set an appropriate value for LIMIT_SEQNO.
    You have to use these variables in your
@@ -125,7 +127,8 @@ void send_window(void)
   if (A_ent.send_next == A_ent.buffer_next || A_ent.send_next == A_ent.window_start + WINDOW_SIZE)
     return;
 
-  starttimer(A, RXMT_TIMEOUT);
+  restart_rxmt_timer();
+
   while (A_ent.send_next < A_ent.buffer_next && A_ent.send_next < A_ent.window_start + WINDOW_SIZE)
   {
     struct pkt *packet = A_ent.packet_buffer[A_ent.send_next % BUFSIZE];
@@ -200,19 +203,22 @@ bool insert_sack(struct pkt packet)
 int sack_offset(void)
 {
   int i;
-  for (i = 4; i >= 0; i--)
+  for (i = 0; i < 5; i++)
   {
-    if (B_ent.ack_pkt.sack[i] >= 0)
+    if (B_ent.ack_pkt.sack[i] < 0)
     {
-      return i + 1;
+      break;
     }
   }
-  return 0;
+  return i;
 }
 
 void record_time_measurement(int i)
 {
   struct timespec *packet_start = A_ent.packet_timer[i % BUFSIZE];
+  if (!packet_start)
+    return;
+
   double measurement_time = (stop.tv_sec - packet_start->tv_sec) * 1000 +
                             (stop.tv_nsec - packet_start->tv_nsec) / 1000000.0;
   free(packet_start);
@@ -239,10 +245,11 @@ void A_output(struct msg message)
   if (packet)
   {
     printf("  A_output: buffer full\n");
+    Simulation_done();
     exit(1);
   }
   packet = (struct pkt *)malloc(sizeof(struct pkt));
-  packet->seqnum = A_ent.send_next % LIMIT_SEQNO;
+  packet->seqnum = A_ent.buffer_next % LIMIT_SEQNO;
   memmove(packet->payload, message.data, 20);
   packet->checksum = get_checksum(*packet);
   A_ent.packet_buffer[A_ent.buffer_next % BUFSIZE] = packet;
@@ -281,23 +288,6 @@ void A_input(struct pkt ack_packet)
         record_time_measurement(j);
       }
     }
-    // retransmit unACKed packets
-    if (A_ent.window_start < A_ent.send_next)
-    {
-      restart_rxmt_timer();
-      for (int i = A_ent.window_start; i < A_ent.send_next; i++)
-      {
-        struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
-        if (packet)
-        {
-          printf("  A_input: retransmit unACKed packet (seq=%d): %s\n",
-                 packet->seqnum, packet->payload);
-          tolayer3(A, *packet);
-          A_ent.retransmitted[i % BUFSIZE] = true;
-          num_retransmissions++;
-        }
-      }
-    }
     return;
   }
 
@@ -320,10 +310,8 @@ void A_input(struct pkt ack_packet)
            diff, i % LIMIT_SEQNO, A_ent.send_next % LIMIT_SEQNO);
     A_ent.window_start = i;
   }
-  if (A_ent.window_start == A_ent.send_next)
+  if (A_ent.window_start == A_ent.send_next) // Send any new packets waiting in the buffer
   {
-    stoptimer(A);
-    // Send any new packets waiting in the buffer
     send_window();
   }
 }
@@ -333,14 +321,13 @@ void A_timerinterrupt(void)
 {
   if (A_ent.window_start == A_ent.send_next)
     return;
-
   starttimer(A, RXMT_TIMEOUT);
   for (int i = A_ent.window_start; i < A_ent.send_next; i++)
   {
     struct pkt *packet = A_ent.packet_buffer[i % BUFSIZE];
     if (packet)
     {
-      printf("  A_timerinterrupt: Case3 -> retransmit packet (seq=%d): %s\n",
+      printf("  A_timerinterrupt: Case3 -> retransmit unACKed packet (seq=%d): %s\n",
              packet->seqnum, packet->payload);
       tolayer3(A, *packet);
       A_ent.retransmitted[i % BUFSIZE] = true;
@@ -365,8 +352,11 @@ void B_input(struct pkt packet)
   {
     num_corrupted++;
     printf("  B_input: recv corrupted packet\n");
+    return;
   }
-  else if (packet.seqnum != B_ent.window_start % LIMIT_SEQNO)
+
+  print_window(B);
+  if (packet.seqnum != B_ent.window_start % LIMIT_SEQNO)
   {
     printf("  B_input: recv out-of-order packet (seq=%d): %s\n",
            packet.seqnum, packet.payload);
@@ -378,15 +368,18 @@ void B_input(struct pkt packet)
   }
   else
   {
-    printf("  B_input: recv packet (seq=%d): %s\n",
+    printf("  B_input: recv in-order packet (seq=%d): %s\n",
            packet.seqnum, packet.payload);
     tolayer5(packet.payload);
     num_delivered++;
-    B_ent.window_start++;
-    B_ent.window_start += sack_offset();
-    memset(B_ent.ack_pkt.sack, -1, sizeof(B_ent.ack_pkt.sack));
+    int offset = 1 + sack_offset();
+    B_ent.window_start += offset;
+    for (int i = 0; i < 5; i++) // shift SACK
+    {
+      B_ent.ack_pkt.sack[i] = i + offset < 5 ? B_ent.ack_pkt.sack[i + offset] : -1;
+    }
   }
-  print_window(B);
+
   send_ack();
 }
 
@@ -582,7 +575,7 @@ void init(void) /* initialize the simulator */
   scanf("%lf", &lambda);
   printf("Enter window size [>0]:");
   scanf("%d", &WINDOW_SIZE);
-  LIMIT_SEQNO = WINDOW_SIZE + 1; // set appropriately; here assumes GBN
+  LIMIT_SEQNO = WINDOW_SIZE * 2; // set appropriately; here assumes SR
   printf("Enter retransmission timeout [> 0.0]:");
   scanf("%lf", &RXMT_TIMEOUT);
   printf("Enter trace level:");
