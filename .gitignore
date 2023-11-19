@@ -1,3 +1,5 @@
 .vscode/
-out/
+*.dSYM/
 OutputFile
+pa2_sr
+pa2_gbn
