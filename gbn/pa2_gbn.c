@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
-#include <strings.h>
+#include <string.h>
 #include <fcntl.h>
 #include <sys/time.h>
 #include <sys/file.h>
@@ -134,7 +134,7 @@ void send_window(void)
     struct pkt *packet = A_ent.packet_buffer[A_ent.send_next % BUFSIZE];
     struct timespec *packet_start = (struct timespec *)malloc(sizeof(struct timespec));
     A_ent.packet_timer[A_ent.send_next % BUFSIZE] = packet_start;
-    clock_gettime(CLOCK_MONOTONIC_RAW, packet_start);
+    clock_gettime(CLOCK_REALTIME, packet_start);
     printf("  send_window: send packet (seq=%d): %s\n",
            packet->seqnum, packet->payload);
     tolayer3(A, *packet);
@@ -270,7 +270,7 @@ void A_input(struct pkt ack_packet)
     return;
   }
 
-  clock_gettime(CLOCK_MONOTONIC_RAW, &stop);
+  clock_gettime(CLOCK_REALTIME, &stop);
   printf("  A_input: recv ACK (ack=%d)\n", ack_packet.acknum);
 
   if (ack_packet.acknum == A_ent.window_start % LIMIT_SEQNO)
