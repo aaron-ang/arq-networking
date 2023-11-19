@@ -3,7 +3,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <fcntl.h>
-#include <sys/time.h>
+#include <time.h>
 #include <sys/file.h>
 #include <sys/types.h>
 #include <netinet/in.h>
