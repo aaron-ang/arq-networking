@@ -4,3 +4,4 @@ OutputFile
 pa2_sr
 pa2_gbn
 *.exe
+.ipynb_checkpoints
